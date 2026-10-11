@@ -1,0 +1,464 @@
+-- Cursor + Mouse virtual (Delta Executor) - imagens do GitHub
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local TweenService = game:GetService("TweenService")
+local ContentProvider = game:GetService("ContentProvider")
+local RunService = game:GetService("RunService")
+
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- CONFIG
+local MOUSE_URL = "https://raw.githubusercontent.com/luckz12389-ai/GTA/main/IMG_fee983c8-817e-4c4c-aba4-6cbe4bcca014.png"
+local CURSOR_URL = "https://raw.githubusercontent.com/luckz12389-ai/GTA/main/file_00000000751c820eb762d1a0ea053e7b.png"
+local TOGGLE_URL = "https://raw.githubusercontent.com/luckz12389-ai/gta/main/1791728168253.png"
+local SENS = 1.8 -- velocidade do cursor
+local ACEL = 1.5 -- aceleração (0 = sem aceleração)
+local CURSOR_SIZE = 30
+local MOUSE_W, MOUSE_H = 160, 220
+local TOGGLE_SIZE = 54
+local TOUCH_ID = 5
+local HOTSPOT_X, HOTSPOT_Y = 0, 0 -- onde fica a ponta do cursor na imagem (0 a 1)
+
+-- Ajuste fino do ponto do clique (pixels): X positivo = mais à direita | Y positivo = mais abaixo
+local AJUSTE_X = 0
+local AJUSTE_Y = 0
+
+local function getParent()
+	local ok, h = pcall(function() return gethui and gethui() end)
+	if ok and h then return h end
+	local ok2 = pcall(function() return game:GetService("CoreGui").Name end)
+	if ok2 then return game:GetService("CoreGui") end
+	return playerGui
+end
+local parent = getParent()
+local old = parent:FindFirstChild("CursorMouseDelta")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "CursorMouseDelta"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
+gui.Parent = parent
+
+repeat task.wait() until gui.AbsoluteSize.X > 0 and gui.AbsoluteSize.Y > 0
+
+local conns = {}
+local function connect(sig, fn)
+	local c = sig:Connect(fn)
+	table.insert(conns, c)
+	return c
+end
+
+local oldMouseIcon = UIS.MouseIconEnabled
+pcall(function() UIS.MouseIconEnabled = false end)
+
+------------------------------------------------ MODO CELULAR (nunca PC)
+local injecting = false
+local injectToken = 0
+local held = false
+local controls, origChanged
+
+pcall(function()
+	local pm = require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 5))
+	controls = pm:GetControls()
+	origChanged = controls.OnLastInputTypeChanged
+	local pcTypes = {
+		[Enum.UserInputType.MouseButton1] = true,
+		[Enum.UserInputType.MouseButton2] = true,
+		[Enum.UserInputType.MouseButton3] = true,
+		[Enum.UserInputType.MouseWheel] = true,
+		[Enum.UserInputType.MouseMovement] = true,
+		[Enum.UserInputType.Keyboard] = true,
+	}
+	controls.OnLastInputTypeChanged = function(self, t)
+		if injecting and pcTypes[t] then return end
+		return origChanged(self, t)
+	end
+end)
+
+local function sendTouch(state, p)
+	if not VIM then return false end
+	return pcall(function()
+		VIM:SendTouchEvent(TOUCH_ID, state, p.X, p.Y)
+	end)
+end
+
+-- manda um toque fora da tela só para o Roblox voltar ao modo celular
+local function backToTouch()
+	if VIM then
+		sendTouch(0, Vector2.new(-100, -100))
+		task.wait(0.02)
+		sendTouch(2, Vector2.new(-100, -100))
+	end
+	pcall(function()
+		if controls and origChanged then origChanged(controls, Enum.UserInputType.Touch) end
+	end)
+	pcall(function() UIS.MouseIconEnabled = false end)
+end
+
+local function startInject()
+	injecting = true
+	injectToken += 1
+end
+local function endInject()
+	local t = injectToken
+	task.delay(0.25, function()
+		if t == injectToken and not held then
+			injecting = false
+			backToTouch()
+		end
+	end)
+end
+
+------------------------------------------------ IMAGENS (GitHub)
+local function download(url)
+	local ok, body = pcall(function() return game:HttpGet(url) end)
+	if ok and body and #body > 0 then return body end
+	local req = (syn and syn.request) or (http and http.request) or http_request or request
+	if req then
+		local ok2, res = pcall(req, { Url = url, Method = "GET" })
+		if ok2 and res and res.StatusCode == 200 then return res.Body end
+	end
+	return nil
+end
+
+local function applyImage(obj, url, fname)
+	if not (writefile and getcustomasset) then return false end
+	local bytes = download(url)
+	if bytes then pcall(writefile, fname, bytes) end
+	local okExists = isfile and isfile(fname)
+	if okExists == false then return false end
+	local ok, asset = pcall(getcustomasset, fname)
+	if not ok or not asset then return false end
+	obj.Image = asset
+	pcall(function() ContentProvider:PreloadAsync({ obj }) end)
+	return obj.IsLoaded
+end
+
+------------------------------------------------ CURSOR
+local cursor = Instance.new("ImageLabel")
+cursor.Name = "Cursor"
+cursor.AnchorPoint = Vector2.new(HOTSPOT_X, HOTSPOT_Y)
+cursor.Size = UDim2.fromOffset(CURSOR_SIZE, CURSOR_SIZE)
+cursor.BackgroundTransparency = 1
+cursor.BorderSizePixel = 0
+cursor.ScaleType = Enum.ScaleType.Fit
+cursor.Active = false
+cursor.ZIndex = 100
+cursor.Parent = gui
+
+local cursorPos = Vector2.new(300, 300)
+
+local function clickPoint()
+	return Vector2.new(cursorPos.X + AJUSTE_X, cursorPos.Y + AJUSTE_Y)
+end
+
+------------------------------------------------ MOUSE (fixo)
+local body = Instance.new("ImageButton")
+body.Name = "Mouse"
+body.Size = UDim2.fromOffset(MOUSE_W, MOUSE_H)
+body.BackgroundTransparency = 1
+body.BorderSizePixel = 0
+body.AutoButtonColor = false
+body.ScaleType = Enum.ScaleType.Fit
+body.ZIndex = 50
+body.Parent = gui
+body.Position = UDim2.fromOffset(
+	math.max(gui.AbsoluteSize.X - MOUSE_W - 120, 0),
+	math.max(gui.AbsoluteSize.Y - MOUSE_H - 30, 0)
+)
+
+local function zone(name, pos, size)
+	local b = Instance.new("TextButton")
+	b.Name = name
+	b.Position = pos
+	b.Size = size
+	b.BackgroundTransparency = 1
+	b.BorderSizePixel = 0
+	b.Text = ""
+	b.AutoButtonColor = false
+	b.ZIndex = 52
+	b.Parent = body
+	return b
+end
+local leftZone = zone("Esquerdo", UDim2.fromScale(0, 0), UDim2.fromScale(0.5, 0.4))
+local rightZone = zone("Direito", UDim2.fromScale(0.5, 0), UDim2.fromScale(0.5, 0.4))
+
+------------------------------------------------ BOTÃO MOSTRAR/ESCONDER + FECHAR
+local toggle = Instance.new("ImageButton")
+toggle.Name = "Toggle"
+toggle.Size = UDim2.fromOffset(TOGGLE_SIZE, TOGGLE_SIZE)
+toggle.Position = UDim2.fromOffset(120, math.floor(gui.AbsoluteSize.Y * 0.45))
+toggle.BackgroundTransparency = 1
+toggle.BorderSizePixel = 0
+toggle.AutoButtonColor = false
+toggle.ScaleType = Enum.ScaleType.Fit
+toggle.ZIndex = 200
+toggle.Parent = gui
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Name = "Fechar"
+closeBtn.Size = UDim2.fromOffset(22, 22)
+closeBtn.Position = UDim2.new(1, -8, 0, -8)
+closeBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+closeBtn.BorderSizePixel = 0
+closeBtn.Text = "×"
+closeBtn.TextColor3 = Color3.fromRGB(255, 70, 70)
+closeBtn.TextSize = 18
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.AutoButtonColor = false
+closeBtn.ZIndex = 201
+closeBtn.Parent = toggle
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(1, 0)
+
+task.spawn(applyImage, cursor, CURSOR_URL, "cm_cursor.png")
+task.spawn(applyImage, body, MOUSE_URL, "cm_mouse.png")
+task.spawn(function()
+	if not applyImage(toggle, TOGGLE_URL, "cm_toggle.png") then
+		toggle.BackgroundTransparency = 0.3
+		toggle.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		Instance.new("UICorner", toggle).CornerRadius = UDim.new(1, 0)
+	end
+end)
+
+local visible = true
+connect(toggle.Activated, function()
+	visible = not visible
+	cursor.Visible = visible
+	body.Visible = visible
+end)
+
+------------------------------------------------ TRAVAR A CÂMERA ENQUANTO O DEDO ESTÁ NO MOUSE
+local camLocked, prevCamType = false, nil
+local function lockCamera()
+	if camLocked then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	camLocked = true
+	prevCamType = cam.CameraType
+	cam.CameraType = Enum.CameraType.Scriptable
+end
+local function unlockCamera()
+	if not camLocked then return end
+	camLocked = false
+	local cam = workspace.CurrentCamera
+	if cam and prevCamType then cam.CameraType = prevCamType end
+end
+
+local lockInput
+local function isPress(i)
+	return i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1
+end
+local function lockOn(i)
+	if isPress(i) and not lockInput then
+		lockInput = i
+		lockCamera()
+	end
+end
+for _, obj in ipairs({ body, leftZone, rightZone }) do
+	connect(obj.InputBegan, lockOn)
+end
+
+------------------------------------------------ CLIQUE
+local touchMode = nil -- nil = ainda não testou | true = toque funciona | false = usa mouse
+local usedTouch = false
+local usedMouse = false
+local MOVE_PENDING = false
+
+local function mouseMove()
+	local p = clickPoint()
+	pcall(VIM.SendMouseMoveEvent, VIM, p.X, p.Y, game)
+end
+
+local function mouseButton(down)
+	local p = clickPoint()
+	pcall(VIM.SendMouseButtonEvent, VIM, p.X, p.Y, 0, down, game, 0)
+end
+
+-- Reserva (sem VirtualInputManager)
+local function fallbackClick()
+	local inset = GuiService:GetGuiInset()
+	local p = clickPoint()
+	local list = playerGui:GetGuiObjectsAtPosition(p.X - inset.X, p.Y - inset.Y)
+	for _, o in ipairs(list) do
+		if not o:IsDescendantOf(gui) then
+			if o:IsA("TextBox") then
+				o:CaptureFocus()
+				return
+			elseif o:IsA("GuiButton") then
+				if firesignal then
+					pcall(firesignal, o.MouseButton1Down)
+					pcall(firesignal, o.MouseButton1Click)
+					pcall(firesignal, o.Activated)
+					pcall(firesignal, o.MouseButton1Up)
+				end
+				return
+			end
+		end
+	end
+	local cam = workspace.CurrentCamera
+	local ray = cam:ViewportPointToRay(p.X, p.Y)
+	local params = RaycastParams.new()
+	if player.Character then params.FilterDescendantsInstances = { player.Character } end
+	local r = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+	if r and r.Instance then
+		local cd = r.Instance:FindFirstChildWhichIsA("ClickDetector", true)
+			or (r.Instance.Parent and r.Instance.Parent:FindFirstChildWhichIsA("ClickDetector", true))
+		if cd and fireclickdetector then pcall(fireclickdetector, cd) end
+		local pp = r.Instance:FindFirstChildWhichIsA("ProximityPrompt", true)
+			or (r.Instance.Parent and r.Instance.Parent:FindFirstChildWhichIsA("ProximityPrompt", true))
+		if pp and fireproximityprompt then pcall(fireproximityprompt, pp) end
+	end
+	local tool = player.Character and player.Character:FindFirstChildOfClass("Tool")
+	if tool then tool:Activate() end
+end
+
+local function shrink(on)
+	local sz = on and (CURSOR_SIZE - 4) or CURSOR_SIZE
+	TweenService:Create(cursor, TweenInfo.new(0.08), { Size = UDim2.fromOffset(sz, sz) }):Play()
+end
+
+local function pressDown()
+	held = true
+	shrink(true)
+	usedTouch, usedMouse = false, false
+	if not VIM then return end
+
+	if touchMode ~= false then
+		local seen = false
+		local c = UIS.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.Touch then seen = true end
+		end)
+		sendTouch(0, clickPoint())
+		if touchMode == nil then
+			task.wait(0.12)
+			touchMode = seen
+			if not seen then sendTouch(2, clickPoint()) end
+		end
+		c:Disconnect()
+		if touchMode then
+			usedTouch = true
+			return
+		end
+	end
+
+	-- plano B: clique de mouse (com proteção contra o modo PC)
+	usedMouse = true
+	startInject()
+	mouseMove()
+	task.wait(0.03)
+	mouseButton(true)
+end
+
+local function pressUp()
+	held = false
+	shrink(false)
+	if usedTouch then
+		sendTouch(2, clickPoint())
+	elseif usedMouse then
+		mouseButton(false)
+		endInject()
+	elseif not VIM then
+		fallbackClick()
+	end
+	usedTouch, usedMouse = false, false
+end
+
+local function setCursor(p)
+	local s = gui.AbsoluteSize
+	cursorPos = Vector2.new(
+		math.clamp(p.X, 0, math.max(s.X - 1, 1)),
+		math.clamp(p.Y, 0, math.max(s.Y - 1, 1))
+	)
+	cursor.Position = UDim2.fromOffset(cursorPos.X, cursorPos.Y)
+	if held then
+		if usedTouch then
+			sendTouch(1, clickPoint()) -- arrasta enquanto segura
+		elseif usedMouse then
+			mouseMove()
+		end
+	end
+end
+setCursor(gui.AbsoluteSize / 2)
+
+-- Direito = clica
+connect(rightZone.InputBegan, function(i)
+	if isPress(i) and not held then
+		pressDown()
+		task.wait(0.07)
+		pressUp()
+	end
+end)
+
+-- Esquerdo = segura (toque de novo para soltar)
+connect(leftZone.InputBegan, function(i)
+	if isPress(i) then
+		if held then pressUp() else pressDown() end
+	end
+end)
+
+------------------------------------------------ MOVER O CURSOR (deslizar o dedo no mouse)
+local pad, padLast
+local accum = Vector2.new(0, 0)
+
+local function same(tracked, input)
+	return tracked == input
+		or (tracked.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement)
+end
+
+connect(body.InputBegan, function(i)
+	if isPress(i) then
+		pad = i
+		padLast = Vector2.new(i.Position.X, i.Position.Y)
+		accum = Vector2.new(0, 0)
+	end
+end)
+
+connect(UIS.InputChanged, function(input)
+	if pad and same(pad, input) then
+		local pos = Vector2.new(input.Position.X, input.Position.Y)
+		accum += pos - padLast
+		padLast = pos
+	end
+end)
+
+-- aplica o movimento uma vez por frame, com aceleração leve
+connect(RunService.RenderStepped, function()
+	if accum.Magnitude > 0 then
+		local d = accum
+		accum = Vector2.new(0, 0)
+		local gain = SENS * (1 + math.clamp(d.Magnitude / 25, 0, 1.5) * ACEL / 1.5)
+		setCursor(cursorPos + d * gain)
+	end
+end)
+
+connect(UIS.InputEnded, function(input)
+	if pad and (input == pad or (isPress(input) and pad.UserInputType == input.UserInputType)) then
+		pad = nil
+		accum = Vector2.new(0, 0)
+	end
+	if lockInput and (input == lockInput or (isPress(input) and lockInput.UserInputType == input.UserInputType)) then
+		lockInput = nil
+		unlockCamera()
+	end
+end)
+
+------------------------------------------------ FECHAR
+connect(closeBtn.Activated, function()
+	unlockCamera()
+	injecting = false
+	pcall(function()
+		if controls and origChanged then controls.OnLastInputTypeChanged = origChanged end
+	end)
+	pcall(function() UIS.MouseIconEnabled = oldMouseIcon end)
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	gui:Destroy()
+end)
